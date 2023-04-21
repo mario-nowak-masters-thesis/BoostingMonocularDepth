@@ -16,3 +16,8 @@ dataset_prepare/midas/model.pt
 */**/*.so*
 */**/*.dylib*
 */**/__pycache__
+*.pth
+*.pt
+inputs
+.vscode
+*.png
