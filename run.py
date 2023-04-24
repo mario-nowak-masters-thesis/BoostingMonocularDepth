@@ -3,8 +3,8 @@ from torchvision.transforms import Compose
 from torchvision.transforms import transforms
 
 # OUR
-from utils import ImageandPatchs, ImageDataset, generatemask, getGF_fromintegral, calculateprocessingres, rgb2gray,\
-    applyGridpatch
+from utils import ImageAndPatches, ImageDataset, Images, generate_mask, getGF_fromintegral, calculate_processing_resolution, rgb2gray,\
+    apply_grid_patch
 
 # MIDAS
 import midas.utils
@@ -24,6 +24,7 @@ import os
 import torch
 import cv2
 import numpy as np
+import numpy.typing as npt
 import argparse
 import warnings
 warnings.simplefilter('ignore', np.RankWarning)
@@ -42,7 +43,7 @@ whole_size_threshold = 3000  # R_max from the paper
 GPU_threshold = 1600 - 32 # Limit for the GPU (NVIDIA RTX 2080), can be adjusted 
 
 # MAIN PART OF OUR METHOD
-def run(dataset, option):
+def run(dataset: ImageDataset, option: argparse.Namespace):
 
     # Load merge network
     opt = TestOptions().parse()
@@ -92,7 +93,7 @@ def run(dataset, option):
 
     # Generate mask used to smoothly blend the local pathc estimations to the base estimate.
     # It is arbitrarily large to avoid artifacts during rescaling for each crop.
-    mask_org = generatemask((3000, 3000))
+    mask_org = generate_mask((3000, 3000))
     mask = mask_org.copy()
 
     # Value x of R_x defined in the section 5 of the main paper.
@@ -107,6 +108,7 @@ def run(dataset, option):
     for image_ind, images in enumerate(dataset):
         print('processing image', image_ind, ':', images.name)
 
+        images: Images
         # Load image from dataset
         img = images.rgb_image
         input_resolution = img.shape
@@ -115,14 +117,14 @@ def run(dataset, option):
 
         # Find the best input resolution R-x. The resolution search described in section 5-double estimation of the main paper and section B of the
         # supplementary material.
-        whole_image_optimal_size, patch_scale = calculateprocessingres(img, option.net_receptive_field_size,
+        whole_image_optimal_size, patch_scale = calculate_processing_resolution(img, option.net_receptive_field_size,
                                                                        r_threshold_value, scale_threshold,
                                                                        whole_size_threshold)
 
         print('\t wholeImage being processed in :', whole_image_optimal_size)
 
         # Generate the base estimate using the double estimation.
-        whole_estimate = doubleestimate(img, option.net_receptive_field_size, whole_image_optimal_size,
+        whole_estimate = double_estimate(img, option.net_receptive_field_size, whole_image_optimal_size,
                                         option.pix2pixsize, option.depthNet)
         if option.R0 or option.R20:
             path = os.path.join(result_dir, images.name)
@@ -192,7 +194,7 @@ def run(dataset, option):
 
         # Extract selected patches for local refinement
         base_size = option.net_receptive_field_size*2
-        patchset = generatepatchs(img, base_size)
+        patchset = generate_patches(img, base_size)
 
         print('Target resolution: ', img.shape)
 
@@ -206,7 +208,7 @@ def run(dataset, option):
         else:
             mergein_scale = 1
 
-        imageandpatchs = ImageandPatchs(option.data_dir, images.name, patchset, img, mergein_scale)
+        imageandpatchs = ImageAndPatches(option.data_dir, images.name, patchset, img, mergein_scale)
         whole_estimate_resized = cv2.resize(whole_estimate, (round(img.shape[1]*mergein_scale),
                                             round(img.shape[0]*mergein_scale)), interpolation=cv2.INTER_CUBIC)
         imageandpatchs.set_base_estimate(whole_estimate_resized.copy())
@@ -229,7 +231,7 @@ def run(dataset, option):
 
             # We apply double estimation for patches. The high resolution value is fixed to twice the receptive
             # field size of the network for patches to accelerate the process.
-            patch_estimation = doubleestimate(patch_rgb, option.net_receptive_field_size, option.patch_netsize,
+            patch_estimation = double_estimate(patch_rgb, option.net_receptive_field_size, option.patch_netsize,
                                               option.pix2pixsize, option.depthNet)
 
             # Output patch estimation if required
@@ -298,41 +300,43 @@ def run(dataset, option):
 
 
 # Generating local patches to perform the local refinement described in section 6 of the main paper.
-def generatepatchs(img, base_size):
-    
+def generate_patches(image_array: npt.NDArray, base_size: int):
     # Compute the gradients as a proxy of the contextual cues.
-    img_gray = rgb2gray(img)
-    whole_grad = np.abs(cv2.Sobel(img_gray, cv2.CV_64F, 0, 1, ksize=3)) +\
-        np.abs(cv2.Sobel(img_gray, cv2.CV_64F, 1, 0, ksize=3))
+    img_gray = rgb2gray(image_array)
+    whole_grad = (
+        np.abs(cv2.Sobel(img_gray, cv2.CV_64F, 0, 1, ksize=3))
+        + np.abs(cv2.Sobel(img_gray, cv2.CV_64F, 1, 0, ksize=3))
+    )
 
     threshold = whole_grad[whole_grad > 0].mean()
     whole_grad[whole_grad < threshold] = 0
 
     # We use the integral image to speed-up the evaluation of the amount of gradients for each patch.
-    gf = whole_grad.sum()/len(whole_grad.reshape(-1))
+    gf = whole_grad.sum() / len(whole_grad.reshape(-1))
     grad_integral_image = cv2.integral(whole_grad)
 
     # Variables are selected such that the initial patch size would be the receptive field size
     # and the stride is set to 1/3 of the receptive field size.
-    blsize = int(round(base_size/2))
-    stride = int(round(blsize*0.75))
+    blsize = int(round(base_size / 2))
+    stride = int(round(blsize * 0.75))
 
     # Get initial Grid
-    patch_bound_list = applyGridpatch(blsize, stride, img, [0, 0, 0, 0])
+    patch_bound_list = apply_grid_patch(blsize, stride, image_array, [0, 0, 0, 0])
 
     # Refine initial Grid of patches by discarding the flat (in terms of gradients of the rgb image) ones. Refine
     # each patch size to ensure that there will be enough depth cues for the network to generate a consistent depth map.
     print("Selecting patchs ...")
-    patch_bound_list = adaptiveselection(grad_integral_image, patch_bound_list, gf)
+    patch_bound_list = adaptive_selection(grad_integral_image, patch_bound_list, gf)
 
     # Sort the patch list to make sure the merging operation will be done with the correct order: starting from biggest
     # patch
-    patchset = sorted(patch_bound_list.items(), key=lambda x: getitem(x[1], 'size'), reverse=True)
-    return patchset
+    patch_set = sorted(patch_bound_list.items(), key=lambda x: getitem(x[1], 'size'), reverse=True)
+
+    return patch_set
 
 
 # Adaptively select patches
-def adaptiveselection(integral_grad, patch_bound_list, gf):
+def adaptive_selection(integral_grad, patch_bound_list, gf):
     patchlist = {}
     count = 0
     height, width = integral_grad.shape
@@ -384,16 +388,22 @@ def adaptiveselection(integral_grad, patch_bound_list, gf):
 
 
 # Generate a double-input depth estimation
-def doubleestimate(img, size1, size2, pix2pixsize, net_type):
+def double_estimate(
+        img: npt.NDArray,
+        size1,
+        size2,
+        pix2pix_size: int,
+        net_type
+    ):
     # Generate the low resolution estimation
-    estimate1 = singleestimate(img, size1, net_type)
+    estimate1 = single_estimate(img, size1, net_type)
     # Resize to the inference size of merge network.
-    estimate1 = cv2.resize(estimate1, (pix2pixsize, pix2pixsize), interpolation=cv2.INTER_CUBIC)
+    estimate1 = cv2.resize(estimate1, (pix2pix_size, pix2pix_size), interpolation=cv2.INTER_CUBIC)
 
     # Generate the high resolution estimation
-    estimate2 = singleestimate(img, size2, net_type)
+    estimate2 = single_estimate(img, size2, net_type)
     # Resize to the inference size of merge network.
-    estimate2 = cv2.resize(estimate2, (pix2pixsize, pix2pixsize), interpolation=cv2.INTER_CUBIC)
+    estimate2 = cv2.resize(estimate2, (pix2pix_size, pix2pix_size), interpolation=cv2.INTER_CUBIC)
 
     # Inference on the merge model
     pix2pixmodel.set_input(estimate1, estimate2)
@@ -409,21 +419,21 @@ def doubleestimate(img, size1, size2, pix2pixsize, net_type):
 
 
 # Generate a single-input depth estimation
-def singleestimate(img, msize, net_type):
+def single_estimate(img, msize, net_type):
     if msize > GPU_threshold:
         print(" \t \t DEBUG| GPU THRESHOLD REACHED", msize, '--->', GPU_threshold)
         msize = GPU_threshold
 
     if net_type == 0:
-        return estimatemidas(img, msize)
+        return estimate_midas(img, msize)
     elif net_type == 1:
-        return estimatesrl(img, msize)
+        return estimate_srl(img, msize)
     elif net_type == 2:
-        return estimateleres(img, msize)
+        return estimate_leres(img, msize)
 
 
 # Inference on SGRNet
-def estimatesrl(img, msize):
+def estimate_srl(img, msize):
     # SGRNet forward pass script adapted from https://github.com/KexianHust/Structure-Guided-Ranking-Loss
     img_transform = transforms.Compose([
         transforms.ToTensor(),
@@ -448,7 +458,7 @@ def estimatesrl(img, msize):
     return depth_norm
 
 # Inference on MiDas-v2
-def estimatemidas(img, msize):
+def estimate_midas(img, msize):
     # MiDas -v2 forward pass script adapted from https://github.com/intel-isl/MiDaS/tree/v2
 
     transform = Compose(
@@ -489,7 +499,7 @@ def estimatemidas(img, msize):
     return prediction
 
 
-def scale_torch(img):
+def scale_torch(img: npt.NDArray) -> torch.Tensor:
     """
     Scale the image and output it in torch.tensor.
     :param img: input rgb is in shape [H, W, C], input depth/disp is in shape [H, W]
@@ -508,19 +518,19 @@ def scale_torch(img):
     return img
 
 # Inference on LeRes
-def estimateleres(img, msize):
+def estimate_leres(image_array: npt.NDArray, leres_inference_size: int) -> npt.NDArray:
     # LeReS forward pass script adapted from https://github.com/aim-uofa/AdelaiDepth/tree/main/LeReS
 
-    rgb_c = img[:, :, ::-1].copy()
-    A_resize = cv2.resize(rgb_c, (msize, msize))
-    img_torch = scale_torch(A_resize)[None, :, :, :]
+    rearranged_image_array_copy = image_array[:, :, ::-1].copy() # TODO: why is this necessary?
+    ressized_rearranged_image_array = cv2.resize(rearranged_image_array_copy, (leres_inference_size, leres_inference_size))
+    image_tensor = scale_torch(ressized_rearranged_image_array)[None, :, :, :]
 
     # Forward pass
     with torch.no_grad():
-        prediction = leresmodel.inference(img_torch)
+        prediction = leresmodel.inference(image_tensor)
 
     prediction = prediction.squeeze().cpu().numpy()
-    prediction = cv2.resize(prediction, (img.shape[1], img.shape[0]), interpolation=cv2.INTER_CUBIC)
+    prediction = cv2.resize(prediction, (image_array.shape[1], image_array.shape[0]), interpolation=cv2.INTER_CUBIC)
 
     return prediction
 

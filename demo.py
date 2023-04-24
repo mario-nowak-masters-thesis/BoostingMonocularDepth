@@ -9,8 +9,8 @@ import gradio as gr
 import os
 import gdown
 # OUR
-from utils import ImageandPatchs, generatemask, getGF_fromintegral, calculateprocessingres, rgb2gray,\
-    applyGridpatch
+from utils import ImageAndPatches, generate_mask, getGF_fromintegral, calculate_processing_resolution, rgb2gray,\
+    apply_grid_patch
 
 # MIDAS
 import midas.utils
@@ -60,7 +60,7 @@ midasmodel.to(device)
 midasmodel.eval()
 
 
-mask_org = generatemask((3000, 3000))
+mask_org = generate_mask((3000, 3000))
 
 
 def estimatemidas(img, msize):
@@ -206,7 +206,7 @@ def generatepatchs(img, base_size, factor):
     stride = int(round(blsize * 0.75))
 
     # Get initial Grid
-    patch_bound_list = applyGridpatch(blsize, stride, img, [0, 0, 0, 0])
+    patch_bound_list = apply_grid_patch(blsize, stride, img, [0, 0, 0, 0])
 
     # Refine initial Grid of patches by discarding the flat (in terms of gradients of the rgb image) ones. Refine
     # each patch size to ensure that there will be enough depth cues for the network to generate a consistent depth map.
@@ -235,7 +235,7 @@ def generatedepth(img, type="Final"):
 
     # Find the best input resolution R-x. The resolution search described in section 5-double estimation of the
     # main paper and section B of the supplementary material.
-    whole_image_optimal_size, patch_scale = calculateprocessingres(img, 384,
+    whole_image_optimal_size, patch_scale = calculate_processing_resolution(img, 384,
                                                                    r_threshold_value, scale_threshold,
                                                                    whole_size_threshold)
 
@@ -279,7 +279,7 @@ def generatedepth(img, type="Final"):
     # resolution as the input.
     mergein_scale = input_resolution[0] / img.shape[0]
 
-    imageandpatchs = ImageandPatchs("", "temp.png", patchset, img, mergein_scale)
+    imageandpatchs = ImageAndPatches("", "temp.png", patchset, img, mergein_scale)
     whole_estimate_resized = cv2.resize(whole_estimate, (round(img.shape[1] * mergein_scale),
                                                          round(img.shape[0] * mergein_scale)),
                                         interpolation=cv2.INTER_CUBIC)
