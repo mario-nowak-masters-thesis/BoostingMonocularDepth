@@ -1,3 +1,4 @@
+from operator import getitem
 import torch
 from torchvision.transforms import Compose
 from torchvision.transforms import transforms
@@ -10,8 +11,7 @@ from lib.multi_depth_model_woauxi import RelDepthModel
 from lib.net_tools import strip_prefix_if_present
 from pix2pix.models.pix2pix4depth_model import Pix2Pix4DepthModel
 from pix2pix.options.test_options import TestOptions
-from run import double_estimate, generate_patches
-from utils import ImageAndPatches, calculate_processing_resolution, generate_mask
+from utils import ImageAndPatches, apply_grid_patch, calculate_processing_resolution, generate_mask, getGF_fromintegral, rgb2gray
 
 
 class BoostingMonocularDepthPipeline(torch.nn.Module):
@@ -110,7 +110,7 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
 
         # Extract selected patches for local refinement
         base_size = self.depth_estimator_receptive_field_size * 2
-        patch_set = generate_patches(image_array, base_size)
+        patch_set = self.generate_patches(image_array, base_size)
 
         print('Target resolution: ', image_array.shape)
 
@@ -128,7 +128,7 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
             root_dir= None,
             name=None,
             patches=patch_set,
-            image=image_array,
+            rgb_image=image_array,
             scale=mergein_scale,
         )
         whole_estimate_resized = cv2.resize(
@@ -204,15 +204,15 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
 
             # To speed up the implementation, we only generate the Gaussian mask once with a sufficiently large size
             # and resize it to our needed size while merging the patches.
-            if mask.shape != org_size:
-                mask = cv2.resize(self.mask_org, (org_size[1],org_size[0]), interpolation=cv2.INTER_LINEAR)
+            if self.mask.shape != org_size:
+                self.mask = cv2.resize(self.mask_org, (org_size[1],org_size[0]), interpolation=cv2.INTER_LINEAR)
 
             to_be_merged_to = image_and_patches.estimation_updated_image
 
             # Update the whole estimation:
             # We use a simple Gaussian mask to blend the merged patch region with the base estimate to ensure seamless
             # blending at the boundaries of the patch region.
-            to_be_merged_to[h1:h2, w1:w2] = np.multiply(to_be_merged_to[h1:h2, w1:w2], 1 - mask) + np.multiply(merged, mask)
+            to_be_merged_to[h1:h2, w1:w2] = np.multiply(to_be_merged_to[h1:h2, w1:w2], 1 - self.mask) + np.multiply(merged, self.mask)
             image_and_patches.set_updated_estimate(to_be_merged_to)
 
         if self.output_resolution == 1:
@@ -312,3 +312,90 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
             image_array = torch.from_numpy(image_array)
 
         return image_array
+    
+
+    def generate_patches(self, image_array: npt.NDArray, base_size: int):
+        # Compute the gradients as a proxy of the contextual cues.
+        img_gray = rgb2gray(image_array)
+        whole_grad = (
+            np.abs(cv2.Sobel(img_gray, cv2.CV_64F, 0, 1, ksize=3))
+            + np.abs(cv2.Sobel(img_gray, cv2.CV_64F, 1, 0, ksize=3))
+        )
+
+        threshold = whole_grad[whole_grad > 0].mean()
+        whole_grad[whole_grad < threshold] = 0
+
+        # We use the integral image to speed-up the evaluation of the amount of gradients for each patch.
+        gf = whole_grad.sum() / len(whole_grad.reshape(-1))
+        grad_integral_image = cv2.integral(whole_grad)
+
+        # Variables are selected such that the initial patch size would be the receptive field size
+        # and the stride is set to 1/3 of the receptive field size.
+        blsize = int(round(base_size / 2))
+        stride = int(round(blsize * 0.75))
+
+        # Get initial Grid
+        patch_bound_list = apply_grid_patch(blsize, stride, image_array, [0, 0, 0, 0])
+
+        # Refine initial Grid of patches by discarding the flat (in terms of gradients of the rgb image) ones. Refine
+        # each patch size to ensure that there will be enough depth cues for the network to generate a consistent depth map.
+        print("Selecting patchs ...")
+        patch_bound_list = self.adaptive_selection(grad_integral_image, patch_bound_list, gf)
+
+        # Sort the patch list to make sure the merging operation will be done with the correct order: starting from biggest
+        # patch
+        patch_set = sorted(patch_bound_list.items(), key=lambda x: getitem(x[1], 'size'), reverse=True)
+
+        return patch_set
+
+
+    # Adaptively select patches
+    def adaptive_selection(self, integral_grad, patch_bound_list, gf):
+        patchlist = {}
+        count = 0
+        height, width = integral_grad.shape
+
+        search_step = int(32 / self.factor)
+
+        # Go through all patches
+        for c in range(len(patch_bound_list)):
+            # Get patch
+            bbox = patch_bound_list[str(c)]['rect']
+
+            # Compute the amount of gradients present in the patch from the integral image.
+            cgf = getGF_fromintegral(integral_grad, bbox)/(bbox[2]*bbox[3])
+
+            # Check if patching is beneficial by comparing the gradient density of the patch to
+            # the gradient density of the whole image
+            if cgf >= gf:
+                bbox_test = bbox.copy()
+                patchlist[str(count)] = {}
+
+                # Enlarge each patch until the gradient density of the patch is equal
+                # to the whole image gradient density
+                while True:
+
+                    bbox_test[0] = bbox_test[0] - int(search_step/2)
+                    bbox_test[1] = bbox_test[1] - int(search_step/2)
+
+                    bbox_test[2] = bbox_test[2] + search_step
+                    bbox_test[3] = bbox_test[3] + search_step
+
+                    # Check if we are still within the image
+                    if bbox_test[0] < 0 or bbox_test[1] < 0 or bbox_test[1] + bbox_test[3] >= height \
+                            or bbox_test[0] + bbox_test[2] >= width:
+                        break
+
+                    # Compare gradient density
+                    cgf = getGF_fromintegral(integral_grad, bbox_test)/(bbox_test[2]*bbox_test[3])
+                    if cgf < gf:
+                        break
+                    bbox = bbox_test.copy()
+
+                # Add patch to selected patches
+                patchlist[str(count)]['rect'] = bbox
+                patchlist[str(count)]['size'] = bbox[2]
+                count = count + 1
+        
+        # Return selected patches
+        return patchlist

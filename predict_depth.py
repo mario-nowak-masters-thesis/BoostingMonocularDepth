@@ -51,6 +51,6 @@ if __name__ == "__main__":
 
     depth_prediction = boosting_monocular_depth_pipeline(input_image)
 
-    input_file_name = os.path.basename(arguments.input_file_path)
+    input_file_name = os.path.basename(arguments.input_image_path)
     output_file_name = os.path.join(arguments.output_dir, input_file_name)
     midas.utils.write_depth(output_file_name, depth_prediction)
