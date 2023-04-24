@@ -1,42 +1,10 @@
-from operator import getitem
-from torchvision.transforms import Compose
-from torchvision.transforms import transforms
-
-# OUR
-from utils import (
-    ImageAndPatches,
-    ImageDataset,
-    Images,
-    generate_mask,
-    getGF_fromintegral,
-    calculate_processing_resolution,
-    rgb2gray,
-    apply_grid_patch,
-)
-
 # MIDAS
 import midas.utils
-from midas.models.midas_net import MidasNet
-from midas.models.transforms import Resize, NormalizeImage, PrepareForNet
 
-# AdelaiDepth
-from lib.multi_depth_model_woauxi import RelDepthModel
-from lib.net_tools import strip_prefix_if_present
-
-# PIX2PIX : MERGE NET
-from pix2pix.options.test_options import TestOptions
-from pix2pix.models.pix2pix4depth_model import Pix2Pix4DepthModel
-
-import time
 import os
 import torch
-import cv2
-import numpy as np
-import numpy.typing as npt
 import argparse
-import warnings
 
-warnings.simplefilter("ignore", np.RankWarning)
 from boosting_monocular_depth_pipe import BoostingMonocularDepthPipeline
 from PIL import Image
 
