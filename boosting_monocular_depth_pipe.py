@@ -44,10 +44,8 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
         self.output_depth_in_original_resolution = output_depth_in_original_resolution
 
         # prepare pix2pix
-        pix2pix_inference_settings = TestOptions().parse()  # TODO: fix this
         self.pix2pix_inference_dimensions = (1024, 1024)
-        self.pix2pix_model = Pix2Pix4DepthModel(pix2pix_inference_settings)
-        self.pix2pix_model.save_dir = pix2pix_model_path
+        self.pix2pix_model = Pix2Pix4DepthModel(save_dir=pix2pix_model_path)
         self.pix2pix_model.load_networks("latest")
         self.pix2pix_model.eval()
 

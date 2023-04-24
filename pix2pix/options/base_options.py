@@ -72,8 +72,6 @@ class BaseOptions():
         parser.add_argument('--Final', action='store_true')
         parser.add_argument('--colorize_results', action='store_true')
         parser.add_argument('--max_res', type=float, default=np.inf)
-        parser.add_argument('--input_image_path', type=str, required=True, help='input files directory '
-                                                                    'Images can be .png .jpg .tiff')
 
         self.initialized = True
         return parser

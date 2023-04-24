@@ -1,3 +1,4 @@
+from typing import Literal, Union
 import torch
 from .base_model import BaseModel
 from . import networks
@@ -36,56 +37,87 @@ class Pix2Pix4DepthModel(BaseModel):
             parser.add_argument("--lambda_L1", type=float, default=1000, help="weight for L1 loss")
         return parser
 
-    def __init__(self, opt):
+    def __init__(
+        self,
+        save_dir: str,
+        checkpoints_dir="",
+        is_train=False,
+        name="void",
+        preprocess: Literal[
+            "resize_and_crop", "crop", "scale_width", "scale_width_and_crop", "none"
+        ] = "resize_and_crop",
+        lr_policy: Literal["linear", "step", "plateau", "cosine"] = "linear",
+        gpu_ids: list[int] = [0],
+        number_input_image_channels=2,
+        number_output_image_channels=1,
+        number_generation_filters=64,
+        number_discrimination_filters=64,
+        discriminator_architecture: Literal["basic", "n_layers", "pixel"] = "basic",
+        discriminator_number_layers=3,
+        normalization: Literal["instance", "batch", "none"] = "instance",
+        network_initialization: Literal["normal", "xavier", "kaiming", "orthogonal"] = "normal",
+        gain_scaling_factor=0.02,
+        gan_mode: Literal["vanilla", "lsgan", "wgangp"] = "lsgan",
+        beta1=0.5,  # Adam momentum term
+        lambda_L1=1000,
+    ):
         """Initialize the pix2pix class.
 
         Parameters:
             opt (Option class)-- stores all the experiment flags; needs to be a subclass of BaseOptions
         """
-        BaseModel.__init__(self, opt)
+        super().__init__(checkpoints_dir, preprocess, lr_policy, name, is_train, gpu_ids)
         # specify the training losses you want to print out. The training/test scripts will call <BaseModel.get_current_losses>
 
+        self.save_dir = save_dir
+        self.lambda_L1 = lambda_L1
         self.loss_names = ["G_GAN", "G_L1", "D_real", "D_fake"]
         # self.loss_names = ['G_L1']
 
         # specify the images you want to save/display. The training/test scripts will call <BaseModel.get_current_visuals>
-        if self.isTrain:
+        self.visual_names = ["fake_B"]
+        if self.is_train:
             self.visual_names = ["outer", "inner", "fake_B", "real_B"]
-        else:
-            self.visual_names = ["fake_B"]
 
         # specify the models you want to save to the disk. The training/test scripts will call <BaseModel.save_networks> and <BaseModel.load_networks>
-        if self.isTrain:
+        # during test time, only load G
+        self.model_names = ["G"]
+        if self.is_train:
             self.model_names = ["G", "D"]
-        else:  # during test time, only load G
-            self.model_names = ["G"]
 
         # define networks (both generator and discriminator)
         self.netG = networks.define_G(
-            opt.input_nc, opt.output_nc, 64, "unet_1024", "none", False, "normal", 0.02, self.gpu_ids
+            number_input_image_channels,
+            number_output_image_channels,
+            number_generation_filters,
+            "unet_1024",
+            "none",
+            False,
+            "normal",
+            0.02,
+            self.gpu_ids,
         )
 
-        if (
-            self.isTrain
-        ):  # define a discriminator; conditional GANs need to take both input and output images; Therefore, #channels for D is input_nc + output_nc
+        # define a discriminator; conditional GANs need to take both input and output images; Therefore, #channels for D is input_nc + output_nc
+        if self.is_train:
             self.netD = networks.define_D(
-                opt.input_nc + opt.output_nc,
-                opt.ndf,
-                opt.netD,
-                opt.n_layers_D,
-                opt.norm,
-                opt.init_type,
-                opt.init_gain,
+                number_input_image_channels + number_output_image_channels,
+                number_discrimination_filters,
+                discriminator_architecture,
+                discriminator_number_layers,
+                normalization,
+                network_initialization,
+                gain_scaling_factor,
                 self.gpu_ids,
             )
 
-        if self.isTrain:
+        if self.is_train:
             # define loss functions
-            self.criterionGAN = networks.GANLoss(opt.gan_mode).to(self.device)
+            self.criterionGAN = networks.GANLoss(gan_mode).to(self.device)
             self.criterionL1 = torch.nn.L1Loss()
             # initialize optimizers; schedulers will be automatically created by function <BaseModel.setup>.
-            self.optimizer_G = torch.optim.Adam(self.netG.parameters(), lr=1e-4, betas=(opt.beta1, 0.999))
-            self.optimizer_D = torch.optim.Adam(self.netD.parameters(), lr=2e-06, betas=(opt.beta1, 0.999))
+            self.optimizer_G = torch.optim.Adam(self.netG.parameters(), lr=1e-4, betas=(beta1, 0.999))
+            self.optimizer_D = torch.optim.Adam(self.netD.parameters(), lr=2e-06, betas=(beta1, 0.999))
             self.optimizers.append(self.optimizer_G)
             self.optimizers.append(self.optimizer_D)
 
@@ -98,7 +130,7 @@ class Pix2Pix4DepthModel(BaseModel):
 
         self.image_paths = input["image_path"]
 
-        if self.isTrain:
+        if self.is_train:
             self.gtfake = input["data_gtfake"].to(self.device)
             self.gtfake = torch.nn.functional.interpolate(
                 self.gtfake, (1024, 1024), mode="bilinear", align_corners=False
@@ -132,7 +164,7 @@ class Pix2Pix4DepthModel(BaseModel):
         """Calculate GAN loss for the discriminator"""
         # Fake; stop backprop to the generator by detaching fake_B
         # we use conditional GANs; we need to feed both input and output to the discriminator
-        fake_AB = torch.cat((self.real_A, self.fake_B), 1)  
+        fake_AB = torch.cat((self.real_A, self.fake_B), 1)
         pred_fake = self.netD(fake_AB.detach())
         self.loss_D_fake = self.criterionGAN(pred_fake, False)
         # Real
@@ -150,7 +182,7 @@ class Pix2Pix4DepthModel(BaseModel):
         pred_fake = self.netD(fake_AB)
         self.loss_G_GAN = self.criterionGAN(pred_fake, True)
         # Second, G(A) = B
-        self.loss_G_L1 = self.criterionL1(self.fake_B, self.real_B) * self.opt.lambda_L1
+        self.loss_G_L1 = self.criterionL1(self.fake_B, self.real_B) * self.lambda_L1
         # combine loss and calculate gradients
         self.loss_G = self.loss_G_L1 + self.loss_G_GAN
         self.loss_G.backward()
