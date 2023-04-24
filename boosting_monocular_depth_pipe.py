@@ -11,19 +11,26 @@ from lib.multi_depth_model_woauxi import RelDepthModel
 from lib.net_tools import strip_prefix_if_present
 from pix2pix.models.pix2pix4depth_model import Pix2Pix4DepthModel
 from pix2pix.options.test_options import TestOptions
-from utils import ImageAndPatches, apply_grid_patch, calculate_processing_resolution, generate_mask, getGF_fromintegral, rgb2gray
+from utils import (
+    ImageAndPatches,
+    apply_grid_patch,
+    calculate_processing_resolution,
+    generate_mask,
+    getGF_fromintegral,
+    rgb2gray,
+)
 
 
 class BoostingMonocularDepthPipeline(torch.nn.Module):
     def __init__(self):
         super().__init__()
-        self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+        self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
         # prepare pix2pix
         pix2pix_inference_settings = TestOptions().parse()
         self.pix2pix_inference_dimensions = (1024, 1024)
         self.pix2pix_model = Pix2Pix4DepthModel(pix2pix_inference_settings)
-        self.pix2pix_model.save_dir = './pix2pix/checkpoints/mergemodel'  # TODO: add parameter for path
+        self.pix2pix_model.save_dir = "./pix2pix/checkpoints/mergemodel"  # TODO: add parameter for path
         self.pix2pix_model.load_networks("latest")
         self.pix2pix_model.eval()
 
@@ -42,9 +49,7 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
         self.leres_model.eval()
 
         # prepare mask
-        self.mask_org = generate_mask(
-            (3000, 3000)
-        )  # TODO: rename function and make method of class
+        self.mask_org = generate_mask((3000, 3000))  # TODO: rename function and make method of class
         self.mask = self.mask_org.copy()
 
         self.r_threshold_value = 0.2  # TODO: add parameter for r
@@ -53,7 +58,7 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
         self.whole_size_threshold = 3000  # R_max from the paper
         self.gpu_threshold = 1600 - 32  # Limit for the GPU (NVIDIA RTX 2080), can be adjusted
         self.max_res = np.inf
-        self.output_resolution = 1 # TODO: make this a boolean
+        self.output_resolution = 1  # TODO: make this a boolean
         # TODO: support other models as well
         self.depth_estimator_receptive_field_size = self.leres_receptive_field_size
         self.depth_estimator_patch_size = self.leres_patch_size
@@ -82,7 +87,7 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
         # Compute the multiplier described in section 6 of the main paper to make sure our initial patch can select
         # small high-density regions of the image.
         self.factor = max(min(1, 4 * patch_scale * whole_image_optimal_size / self.whole_size_threshold), 0.2)
-        print('Adjust factor is:', 1 / self.factor)
+        print("Adjust factor is:", 1 / self.factor)
 
         # Compute the default target resolution.
         if image_array.shape[0] > image_array.shape[1]:
@@ -95,8 +100,8 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
         a = int(round(a / self.factor))
 
         # recompute a, b and saturate to max res.
-        if max(a,b) > self.max_res:
-            print('Default Res is higher than max-res: Reducing final resolution')
+        if max(a, b) > self.max_res:
+            print("Default Res is higher than max-res: Reducing final resolution")
             if image_array.shape[0] > image_array.shape[1]:
                 a = self.max_res
                 b = round(self.max_res * image_array.shape[1] / image_array.shape[0])
@@ -105,14 +110,14 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
                 b = self.max_res
             b = int(b)
             a = int(a)
-        
+
         image_array = cv2.resize(image_array, (b, a), interpolation=cv2.INTER_CUBIC)
 
         # Extract selected patches for local refinement
         base_size = self.depth_estimator_receptive_field_size * 2
         patch_set = self.generate_patches(image_array, base_size)
 
-        print('Target resolution: ', image_array.shape)
+        print("Target resolution: ", image_array.shape)
 
         # Computing a scale in case user prompted to generate the results as the same resolution of the input.
         # Notice that our method output resolution is independent of the input resolution and this parameter will only
@@ -120,12 +125,12 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
         # as the input.
         if self.output_resolution == 1:
             mergein_scale = input_resolution[0] / image_array.shape[0]
-            print('Dynamicly change merged-in resolution; scale:', mergein_scale)
+            print("Dynamicly change merged-in resolution; scale:", mergein_scale)
         else:
             mergein_scale = 1
 
         image_and_patches = ImageAndPatches(
-            root_dir= None,
+            root_dir=None,
             name=None,
             patches=patch_set,
             rgb_image=image_array,
@@ -134,25 +139,24 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
         whole_estimate_resized = cv2.resize(
             whole_estimate,
             (round(image_array.shape[1] * mergein_scale), round(image_array.shape[0] * mergein_scale)),
-            interpolation=cv2.INTER_CUBIC
+            interpolation=cv2.INTER_CUBIC,
         )
         image_and_patches.set_base_estimate(whole_estimate_resized.copy())
         image_and_patches.set_updated_estimate(whole_estimate_resized.copy())
 
-        print('\t Resulted depthmap res will be :', whole_estimate_resized.shape[:2])
-        print('patchs to process: ' + str(len(image_and_patches)))
+        print("\t Resulted depthmap res will be :", whole_estimate_resized.shape[:2])
+        print("patchs to process: " + str(len(image_and_patches)))
 
         # Enumerate through all patches, generate their estimations and refining the base estimate.
         for patch_ind in range(len(image_and_patches)):
-            
             # Get patch information
-            patch = image_and_patches[patch_ind] # patch object
-            patch_rgb = patch['patch_rgb'] # rgb patch
-            patch_whole_estimate_base = patch['patch_whole_estimate_base'] # corresponding patch from base
-            rect = patch['rect'] # patch size and location
-            patch_id = patch['id'] # patch ID
-            org_size = patch_whole_estimate_base.shape # the original size from the unscaled input
-            print('\t processing patch', patch_ind, '|', rect)
+            patch = image_and_patches[patch_ind]  # patch object
+            patch_rgb = patch["patch_rgb"]  # rgb patch
+            patch_whole_estimate_base = patch["patch_whole_estimate_base"]  # corresponding patch from base
+            rect = patch["rect"]  # patch size and location
+            patch_id = patch["id"]  # patch ID
+            org_size = patch_whole_estimate_base.shape  # the original size from the unscaled input
+            print("\t processing patch", patch_ind, "|", rect)
 
             # We apply double estimation for patches. The high resolution value is fixed to twice the receptive
             # field size of the network for patches to accelerate the process.
@@ -183,7 +187,7 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
             self.pix2pix_model.test()
             visuals = self.pix2pix_model.get_current_visuals()
 
-            prediction_mapped = visuals['fake_B']
+            prediction_mapped = visuals["fake_B"]
             prediction_mapped = (prediction_mapped + 1) / 2
             prediction_mapped = prediction_mapped.squeeze().cpu().numpy()
 
@@ -205,14 +209,16 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
             # To speed up the implementation, we only generate the Gaussian mask once with a sufficiently large size
             # and resize it to our needed size while merging the patches.
             if self.mask.shape != org_size:
-                self.mask = cv2.resize(self.mask_org, (org_size[1],org_size[0]), interpolation=cv2.INTER_LINEAR)
+                self.mask = cv2.resize(self.mask_org, (org_size[1], org_size[0]), interpolation=cv2.INTER_LINEAR)
 
             to_be_merged_to = image_and_patches.estimation_updated_image
 
             # Update the whole estimation:
             # We use a simple Gaussian mask to blend the merged patch region with the base estimate to ensure seamless
             # blending at the boundaries of the patch region.
-            to_be_merged_to[h1:h2, w1:w2] = np.multiply(to_be_merged_to[h1:h2, w1:w2], 1 - self.mask) + np.multiply(merged, self.mask)
+            to_be_merged_to[h1:h2, w1:w2] = np.multiply(to_be_merged_to[h1:h2, w1:w2], 1 - self.mask) + np.multiply(
+                merged, self.mask
+            )
             image_and_patches.set_updated_estimate(to_be_merged_to)
 
         if self.output_resolution == 1:
@@ -225,16 +231,14 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
             final_estimation = image_and_patches.estimation_updated_image
 
         return final_estimation
-    
 
     # Generate a double-input depth estimation
     def double_estimate(
-            self,
-            image_array: npt.NDArray,
-            depth_predictor_receptive_field_size: int,
-            optimal_inference_size: int,
-        ) -> npt.NDArray:
-
+        self,
+        image_array: npt.NDArray,
+        depth_predictor_receptive_field_size: int,
+        optimal_inference_size: int,
+    ) -> npt.NDArray:
         # Generate the low resolution estimation
         low_resolution_estimate = self.single_estimate(image_array, depth_predictor_receptive_field_size)
         # Resize to the inference size of merge network.
@@ -257,29 +261,26 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
         self.pix2pix_model.set_input(low_resolution_estimate, high_resolution_estimate)
         self.pix2pix_model.test()
         visuals = self.pix2pix_model.get_current_visuals()
-        prediction_mapped = visuals['fake_B']
+        prediction_mapped = visuals["fake_B"]
         prediction_mapped = (prediction_mapped + 1) / 2
-        prediction_mapped = (
-            (prediction_mapped - torch.min(prediction_mapped))
-            / (torch.max(prediction_mapped) - torch.min(prediction_mapped))
+        prediction_mapped = (prediction_mapped - torch.min(prediction_mapped)) / (
+            torch.max(prediction_mapped) - torch.min(prediction_mapped)
         )
         prediction_mapped = prediction_mapped.squeeze().cpu().numpy()
 
         return prediction_mapped
 
-    
     def single_estimate(self, image_array: npt.NDArray, inference_image_size: int) -> npt.NDArray:
         if inference_image_size > self.gpu_threshold:
-            print(" \t \t DEBUG| GPU THRESHOLD REACHED", inference_image_size, '--->', self.gpu_threshold)
+            print(" \t \t DEBUG| GPU THRESHOLD REACHED", inference_image_size, "--->", self.gpu_threshold)
             inference_image_size = self.gpu_threshold
 
         # TODO: support other network types as well
         return self.estimate_leres(image_array, leres_inference_size=inference_image_size)
 
-
     def estimate_leres(self, image_array: npt.NDArray, leres_inference_size: int) -> npt.NDArray:
         # LeReS forward pass script adapted from https://github.com/aim-uofa/AdelaiDepth/tree/main/LeReS
-        rearranged_image_array_copy = image_array[:, :, ::-1].copy() # TODO: why is this necessary?
+        rearranged_image_array_copy = image_array[:, :, ::-1].copy()  # TODO: why is this necessary?
         leres_inference_dimensions = (leres_inference_size, leres_inference_size)
         resized_rearranged_image_array = cv2.resize(rearranged_image_array_copy, leres_inference_dimensions)
         image_tensor = self.scale_torch(resized_rearranged_image_array)[None, :, :, :]
@@ -292,7 +293,6 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
         prediction = cv2.resize(prediction, (image_array.shape[1], image_array.shape[0]), interpolation=cv2.INTER_CUBIC)
 
         return prediction
-    
 
     def scale_torch(self, image_array: npt.NDArray) -> torch.Tensor:
         """
@@ -304,22 +304,21 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
         if len(image_array.shape) == 2:
             image_array = image_array[np.newaxis, :, :]
         if image_array.shape[2] == 3:
-            transform = transforms.Compose([transforms.ToTensor(),
-                                            transforms.Normalize((0.485, 0.456, 0.406) , (0.229, 0.224, 0.225) )])
+            transform = transforms.Compose(
+                [transforms.ToTensor(), transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))]
+            )
             image_array = transform(image_array.astype(np.float32))
         else:
             image_array = image_array.astype(np.float32)
             image_array = torch.from_numpy(image_array)
 
         return image_array
-    
 
     def generate_patches(self, image_array: npt.NDArray, base_size: int):
         # Compute the gradients as a proxy of the contextual cues.
         img_gray = rgb2gray(image_array)
-        whole_grad = (
-            np.abs(cv2.Sobel(img_gray, cv2.CV_64F, 0, 1, ksize=3))
-            + np.abs(cv2.Sobel(img_gray, cv2.CV_64F, 1, 0, ksize=3))
+        whole_grad = np.abs(cv2.Sobel(img_gray, cv2.CV_64F, 0, 1, ksize=3)) + np.abs(
+            cv2.Sobel(img_gray, cv2.CV_64F, 1, 0, ksize=3)
         )
 
         threshold = whole_grad[whole_grad > 0].mean()
@@ -344,10 +343,9 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
 
         # Sort the patch list to make sure the merging operation will be done with the correct order: starting from biggest
         # patch
-        patch_set = sorted(patch_bound_list.items(), key=lambda x: getitem(x[1], 'size'), reverse=True)
+        patch_set = sorted(patch_bound_list.items(), key=lambda x: getitem(x[1], "size"), reverse=True)
 
         return patch_set
-
 
     # Adaptively select patches
     def adaptive_selection(self, integral_grad, patch_bound_list, gf):
@@ -360,10 +358,10 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
         # Go through all patches
         for c in range(len(patch_bound_list)):
             # Get patch
-            bbox = patch_bound_list[str(c)]['rect']
+            bbox = patch_bound_list[str(c)]["rect"]
 
             # Compute the amount of gradients present in the patch from the integral image.
-            cgf = getGF_fromintegral(integral_grad, bbox)/(bbox[2]*bbox[3])
+            cgf = getGF_fromintegral(integral_grad, bbox) / (bbox[2] * bbox[3])
 
             # Check if patching is beneficial by comparing the gradient density of the patch to
             # the gradient density of the whole image
@@ -374,28 +372,31 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
                 # Enlarge each patch until the gradient density of the patch is equal
                 # to the whole image gradient density
                 while True:
-
-                    bbox_test[0] = bbox_test[0] - int(search_step/2)
-                    bbox_test[1] = bbox_test[1] - int(search_step/2)
+                    bbox_test[0] = bbox_test[0] - int(search_step / 2)
+                    bbox_test[1] = bbox_test[1] - int(search_step / 2)
 
                     bbox_test[2] = bbox_test[2] + search_step
                     bbox_test[3] = bbox_test[3] + search_step
 
                     # Check if we are still within the image
-                    if bbox_test[0] < 0 or bbox_test[1] < 0 or bbox_test[1] + bbox_test[3] >= height \
-                            or bbox_test[0] + bbox_test[2] >= width:
+                    if (
+                        bbox_test[0] < 0
+                        or bbox_test[1] < 0
+                        or bbox_test[1] + bbox_test[3] >= height
+                        or bbox_test[0] + bbox_test[2] >= width
+                    ):
                         break
 
                     # Compare gradient density
-                    cgf = getGF_fromintegral(integral_grad, bbox_test)/(bbox_test[2]*bbox_test[3])
+                    cgf = getGF_fromintegral(integral_grad, bbox_test) / (bbox_test[2] * bbox_test[3])
                     if cgf < gf:
                         break
                     bbox = bbox_test.copy()
 
                 # Add patch to selected patches
-                patchlist[str(count)]['rect'] = bbox
-                patchlist[str(count)]['size'] = bbox[2]
+                patchlist[str(count)]["rect"] = bbox
+                patchlist[str(count)]["size"] = bbox[2]
                 count = count + 1
-        
+
         # Return selected patches
         return patchlist
