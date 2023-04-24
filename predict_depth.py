@@ -47,7 +47,11 @@ if __name__ == "__main__":
 
     input_image = Image.open(arguments.input_image_path)
 
-    boosting_monocular_depth_pipeline = BoostingMonocularDepthPipeline()
+    boosting_monocular_depth_pipeline = BoostingMonocularDepthPipeline(
+        device=torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"),
+        pix2pix_model_path="./pix2pix/checkpoints/mergemodel",
+        leres_model_path="res101.pth"
+    )
 
     depth_prediction = boosting_monocular_depth_pipeline(input_image)
 

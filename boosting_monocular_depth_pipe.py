@@ -1,4 +1,5 @@
 from operator import getitem
+import os
 import torch
 from torchvision.transforms import Compose
 from torchvision.transforms import transforms
@@ -22,22 +23,38 @@ from utils import (
 
 
 class BoostingMonocularDepthPipeline(torch.nn.Module):
-    def __init__(self):
+    def __init__(
+        self,
+        device: torch.device,
+        pix2pix_model_path: str,
+        leres_model_path: str,
+        r_threshold_value=0.2,
+        scale_threshold_value=3,
+        whole_size_threshold=3000,
+        gpu_threshold=1600 - 32,
+        output_depth_in_original_resolution=True,
+    ):
         super().__init__()
-        self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        self.device = device
+        self.r_threshold_value = r_threshold_value
+        self.scale_threshold = scale_threshold_value
+        self.whole_size_threshold = whole_size_threshold  # R_max from the paper
+        self.gpu_threshold = gpu_threshold  # Limit for the GPU (NVIDIA RTX 2080), can be adjusted
+        self.max_res = np.inf
+        self.output_depth_in_original_resolution = output_depth_in_original_resolution
 
         # prepare pix2pix
-        pix2pix_inference_settings = TestOptions().parse()
+        pix2pix_inference_settings = TestOptions().parse()  # TODO: fix this
         self.pix2pix_inference_dimensions = (1024, 1024)
         self.pix2pix_model = Pix2Pix4DepthModel(pix2pix_inference_settings)
-        self.pix2pix_model.save_dir = "./pix2pix/checkpoints/mergemodel"  # TODO: add parameter for path
+        self.pix2pix_model.save_dir = pix2pix_model_path
         self.pix2pix_model.load_networks("latest")
         self.pix2pix_model.eval()
 
         # prepare depth estimation model LeRes
         self.leres_receptive_field_size: int = 448
         self.leres_patch_size = 2 * self.leres_receptive_field_size
-        leres_model_path = "res101.pth"  # TODO: add parameter for path
+        leres_model_path = leres_model_path
         leres_checkpoint = torch.load(leres_model_path)
         self.leres_model = RelDepthModel(backbone="resnext101")
         self.leres_model.load_state_dict(
@@ -45,20 +62,15 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
             strict=True,
         )
         torch.cuda.empty_cache()
-        self.leres_model.to(self.device)  # TODO: add parameter for device
+        self.leres_model.to(self.device)
         self.leres_model.eval()
 
         # prepare mask
-        self.mask_org = generate_mask((3000, 3000))  # TODO: rename function and make method of class
+        self.mask_org = generate_mask((3000, 3000))
         self.mask = self.mask_org.copy()
 
-        self.r_threshold_value = 0.2  # TODO: add parameter for r
-        self.scale_threshold = 3
-        self.factor = None  # TODO: what is this?
-        self.whole_size_threshold = 3000  # R_max from the paper
-        self.gpu_threshold = 1600 - 32  # Limit for the GPU (NVIDIA RTX 2080), can be adjusted
-        self.max_res = np.inf
-        self.output_resolution = 1  # TODO: make this a boolean
+        self.factor = None  # see section 6 of main paper
+
         # TODO: support other models as well
         self.depth_estimator_receptive_field_size = self.leres_receptive_field_size
         self.depth_estimator_patch_size = self.leres_patch_size
@@ -123,7 +135,7 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
         # Notice that our method output resolution is independent of the input resolution and this parameter will only
         # enable a scaling operation during the local patch merge implementation to generate results with the same resolution
         # as the input.
-        if self.output_resolution == 1:
+        if self.output_depth_in_original_resolution == 1:
             mergein_scale = input_resolution[0] / image_array.shape[0]
             print("Dynamicly change merged-in resolution; scale:", mergein_scale)
         else:
@@ -221,7 +233,7 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
             )
             image_and_patches.set_updated_estimate(to_be_merged_to)
 
-        if self.output_resolution == 1:
+        if self.output_depth_in_original_resolution == 1:
             final_estimation = cv2.resize(
                 image_and_patches.estimation_updated_image,
                 (input_resolution[1], input_resolution[0]),
@@ -297,8 +309,7 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
     def scale_torch(self, image_array: npt.NDArray) -> torch.Tensor:
         """
         Scale the image and output it in torch.tensor.
-        :param img: input rgb is in shape [H, W, C], input depth/disp is in shape [H, W]
-        :param scale: the scale factor. float
+        :param image_array: input rgb is in shape [H, W, C], input depth/disp is in shape [H, W]
         :return: img. [C, H, W]
         """
         if len(image_array.shape) == 2:
