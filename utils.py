@@ -11,7 +11,7 @@ import numpy.typing as npt
 
 def resizewithpool(img, size):
     i_size = img.shape[0]
-    n = int(np.floor(i_size/size))
+    n = int(np.floor(i_size / size))
 
     out = skimage.measure.block_reduce(img, (n, n), np.max)
     return out
@@ -34,9 +34,9 @@ def read_image(path: str):
 def generate_mask(size: tuple[int, int]) -> npt.NDArray[np.float32]:
     # Generates a Guassian mask
     mask = np.zeros(size, dtype=np.float32)
-    sigma = int(size[0]/16)
-    k_size = int(2 * np.ceil(2 * int(size[0]/16)) + 1)
-    mask[int(0.15*size[0]):size[0] - int(0.15*size[0]), int(0.15*size[1]): size[1] - int(0.15*size[1])] = 1
+    sigma = int(size[0] / 16)
+    k_size = int(2 * np.ceil(2 * int(size[0] / 16)) + 1)
+    mask[int(0.15 * size[0]) : size[0] - int(0.15 * size[0]), int(0.15 * size[1]) : size[1] - int(0.15 * size[1])] = 1
     mask: npt.NDArray[np.float32] = cv2.GaussianBlur(mask, (int(k_size), int(k_size)), sigma)
     mask = (mask - mask.min()) / (mask.max() - mask.min())
     mask = mask.astype(np.float32)
@@ -53,13 +53,13 @@ def impatch(image, rect):
     return image_patch
 
 
-def getGF_fromintegral(integralimage, rect):
+def get_GF_from_integral(integral_image, rect):
     # Computes the gradient density of a given patch from the gradient integral image.
     x1 = rect[1]
-    x2 = rect[1]+rect[3]
+    x2 = rect[1] + rect[3]
     y1 = rect[0]
-    y2 = rect[0]+rect[2]
-    value = integralimage[x2, y2]-integralimage[x1, y2]-integralimage[x2, y1]+integralimage[x1, y1]
+    y2 = rect[0] + rect[2]
+    value = integral_image[x2, y2] - integral_image[x1, y2] - integral_image[x2, y1] + integral_image[x1, y1]
     return value
 
 
@@ -69,12 +69,8 @@ def rgb2gray(rgb: npt.NDArray) -> npt.NDArray:
 
 
 def calculate_processing_resolution(
-        image: npt.NDArray,
-        base_size: int,
-        confidence=0.1,
-        scale_threshold=3,
-        whole_size_threshold=3000
-    ) -> tuple[int, float]:
+    image: npt.NDArray, base_size: int, confidence=0.1, scale_threshold=3, whole_size_threshold=3000
+) -> tuple[int, float]:
     # Returns the R_x resolution described in section 5 of the main paper.
 
     # Parameters:
@@ -104,23 +100,23 @@ def calculate_processing_resolution(
     grad[grad >= middle] = 1
 
     # dilation kernel with size of the receptive field
-    kernel = np.ones((int(base_size/speed_scale), int(base_size/speed_scale)), np.float)
+    kernel = np.ones((int(base_size / speed_scale), int(base_size / speed_scale)), np.float)
     # dilation kernel with size of the a quarter of receptive field used to compute k
     # as described in section 6 of main paper
-    kernel2 = np.ones((int(base_size / (4*speed_scale)), int(base_size / (4*speed_scale))), np.float)
+    kernel2 = np.ones((int(base_size / (4 * speed_scale)), int(base_size / (4 * speed_scale))), np.float)
 
     # Output resolution limit set by the whole_size_threshold and scale_threshold.
     threshold = min(whole_size_threshold, scale_threshold * max(image.shape[:2]))
 
     outputsize_scale = base_size / speed_scale
-    for p_size in range(int(base_size/speed_scale), int(threshold/speed_scale), int(base_size / (2*speed_scale))):
+    for p_size in range(int(base_size / speed_scale), int(threshold / speed_scale), int(base_size / (2 * speed_scale))):
         grad_resized = resizewithpool(grad, p_size)
         grad_resized = cv2.resize(grad_resized, (p_size, p_size), cv2.INTER_NEAREST)
         grad_resized[grad_resized >= 0.5] = 1
         grad_resized[grad_resized < 0.5] = 0
 
         dilated = cv2.dilate(grad_resized, kernel, iterations=1)
-        meanvalue = (1-dilated).mean()
+        meanvalue = (1 - dilated).mean()
         if meanvalue > confidence:
             break
         else:
@@ -129,7 +125,7 @@ def calculate_processing_resolution(
     grad_region: npt.NDArray = cv2.dilate(grad_resized, kernel2, iterations=1)
     patch_scale: float = grad_region.mean()
 
-    return int(outputsize_scale*speed_scale), patch_scale
+    return int(outputsize_scale * speed_scale), patch_scale
 
 
 def apply_grid_patch(blsize, stride, img, box):
@@ -140,10 +136,14 @@ def apply_grid_patch(blsize, stride, img, box):
         for j in range(blsize, img.shape[0] - blsize, stride):
             patch_bound_list[str(counter1)] = {}
             patchbounds = [j - blsize, k - blsize, j - blsize + 2 * blsize, k - blsize + 2 * blsize]
-            patch_bound = [box[0] + patchbounds[1], box[1] + patchbounds[0], patchbounds[3] - patchbounds[1],
-                           patchbounds[2] - patchbounds[0]]
-            patch_bound_list[str(counter1)]['rect'] = patch_bound
-            patch_bound_list[str(counter1)]['size'] = patch_bound[2]
+            patch_bound = [
+                box[0] + patchbounds[1],
+                box[1] + patchbounds[0],
+                patchbounds[3] - patchbounds[1],
+                patchbounds[2] - patchbounds[0],
+            ]
+            patch_bound_list[str(counter1)]["rect"] = patch_bound
+            patch_bound_list[str(counter1)]["size"] = patch_bound[2]
             counter1 = counter1 + 1
     return patch_bound_list
 
@@ -166,8 +166,11 @@ class ImageAndPatches:
         self.patches = patches
         self.scale = scale
 
-        self.rgb_image = cv2.resize(rgb_image, (round(rgb_image.shape[1]*scale), round(rgb_image.shape[0]*scale)),
-                                    interpolation=cv2.INTER_CUBIC)
+        self.rgb_image = cv2.resize(
+            rgb_image,
+            (round(rgb_image.shape[1] * scale), round(rgb_image.shape[0] * scale)),
+            interpolation=cv2.INTER_CUBIC,
+        )
 
         self.do_have_estimate = False
         self.estimation_updated_image = None
@@ -188,23 +191,28 @@ class ImageAndPatches:
 
     def __getitem__(self, index):
         patch_id = int(self.patches[index][0])
-        rect = np.array(self.patches[index][1]['rect'])
-        msize = self.patches[index][1]['size']
+        rect = np.array(self.patches[index][1]["rect"])
+        msize = self.patches[index][1]["size"]
 
         ## applying scale to rect:
         rect = np.round(rect * self.scale)
-        rect = rect.astype('int')
+        rect = rect.astype("int")
         msize = round(msize * self.scale)
 
         patch_rgb = impatch(self.rgb_image, rect)
         if self.do_have_estimate:
             patch_whole_estimate_base = impatch(self.estimation_base_image, rect)
             patch_whole_estimate_updated = impatch(self.estimation_updated_image, rect)
-            return {'patch_rgb': patch_rgb, 'patch_whole_estimate_base': patch_whole_estimate_base,
-                    'patch_whole_estimate_updated': patch_whole_estimate_updated, 'rect': rect,
-                    'size': msize, 'id': patch_id}
+            return {
+                "patch_rgb": patch_rgb,
+                "patch_whole_estimate_base": patch_whole_estimate_base,
+                "patch_whole_estimate_updated": patch_whole_estimate_updated,
+                "rect": rect,
+                "size": msize,
+                "id": patch_id,
+            }
         else:
-            return {'patch_rgb': patch_rgb, 'rect': rect, 'size': msize, 'id': patch_id}
+            return {"patch_rgb": patch_rgb, "rect": rect, "size": msize, "id": patch_id}
 
 
 class ImageDataset:

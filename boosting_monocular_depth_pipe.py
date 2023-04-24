@@ -15,7 +15,7 @@ from utils import (
     apply_grid_patch,
     calculate_processing_resolution,
     generate_mask,
-    getGF_fromintegral,
+    get_GF_from_integral,
     rgb2gray,
 )
 
@@ -368,7 +368,7 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
             bbox = patch_bound_list[str(c)]["rect"]
 
             # Compute the amount of gradients present in the patch from the integral image.
-            cgf = getGF_fromintegral(integral_grad, bbox) / (bbox[2] * bbox[3])
+            cgf = get_GF_from_integral(integral_grad, bbox) / (bbox[2] * bbox[3])
 
             # Check if patching is beneficial by comparing the gradient density of the patch to
             # the gradient density of the whole image
@@ -395,7 +395,7 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
                         break
 
                     # Compare gradient density
-                    cgf = getGF_fromintegral(integral_grad, bbox_test) / (bbox_test[2] * bbox_test[3])
+                    cgf = get_GF_from_integral(integral_grad, bbox_test) / (bbox_test[2] * bbox_test[3])
                     if cgf < gf:
                         break
                     bbox = bbox_test.copy()
