@@ -6,11 +6,10 @@ import numpy.typing as npt
 from PIL import Image
 import cv2
 
-from lib.multi_depth_model_woauxi import RelDepthModel
-from lib.net_tools import strip_prefix_if_present
-from pix2pix.models.pix2pix4depth_model import Pix2Pix4DepthModel
-from pix2pix.options.test_options import TestOptions
-from utils import (
+from BoostingMonocularDepth.lib.multi_depth_model_woauxi import RelDepthModel
+from BoostingMonocularDepth.lib.net_tools import strip_prefix_if_present
+from BoostingMonocularDepth.pix2pix.models.pix2pix4depth_model import Pix2Pix4DepthModel
+from BoostingMonocularDepth.utils import (
     ImageAndPatches,
     apply_grid_patch,
     calculate_processing_resolution,
@@ -71,7 +70,7 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
         self.depth_estimator_receptive_field_size = self.leres_receptive_field_size
         self.depth_estimator_patch_size = self.leres_patch_size
 
-    def forward(self, image: Image):
+    def forward(self, image: Image.Image) -> npt.NDArray:
         image_array = np.asarray(image)
         image_array = cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB) / 255.0
         input_resolution = image_array.shape

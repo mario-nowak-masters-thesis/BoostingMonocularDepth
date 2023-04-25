@@ -19,7 +19,7 @@ See our template model class 'template_model.py' for more details.
 """
 
 import importlib
-from pix2pix.models.base_model import BaseModel
+from BoostingMonocularDepth.pix2pix.models.base_model import BaseModel
 
 
 def find_model_using_name(model_name):
