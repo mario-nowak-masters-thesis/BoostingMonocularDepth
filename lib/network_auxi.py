@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.init as init
 
-from BoostingMonocularDepth.lib import Resnet, Resnext_torch
+from lib import Resnet, Resnext_torch
 
 
 def resnet50_stride32():
