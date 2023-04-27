@@ -1,5 +1,5 @@
-from lib import network_auxi as network
-from lib.net_tools import get_func
+from BoostingMonocularDepth.lib import network_auxi as network
+from BoostingMonocularDepth.lib.net_tools import get_func
 import torch
 import torch.nn as nn
 
