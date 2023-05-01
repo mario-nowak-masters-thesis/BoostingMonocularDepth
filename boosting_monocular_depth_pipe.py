@@ -1,4 +1,5 @@
 from operator import getitem
+from typing import Literal
 import torch
 from torchvision.transforms import transforms
 import numpy as np
@@ -8,6 +9,8 @@ import cv2
 
 from BoostingMonocularDepth.lib.multi_depth_model_woauxi import RelDepthModel
 from BoostingMonocularDepth.lib.net_tools import strip_prefix_if_present
+from BoostingMonocularDepth.midas.models.midas_net import MidasNet
+from BoostingMonocularDepth.midas.models.transforms import NormalizeImage, PrepareForNet, Resize
 from BoostingMonocularDepth.pix2pix.models.pix2pix4depth_model import Pix2Pix4DepthModel
 from BoostingMonocularDepth.utils import (
     ImageAndPatches,
@@ -24,7 +27,8 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
         self,
         device: torch.device,
         pix2pix_model_path: str,
-        leres_model_path: str,
+        depth_estimator_model_path: str,
+        depth_estimator: Literal['leres', 'midas'] = 'leres',
         r_threshold_value=0.2,
         scale_threshold_value=3,
         whole_size_threshold=3000,
@@ -32,6 +36,8 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
         output_depth_in_original_resolution=True,
     ):
         super().__init__()
+        assert depth_estimator in ['leres', 'midas'], "Only the depth estimators 'leres' and 'midas' are supported"
+        self.depth_estimator = depth_estimator
         self.device = device
         self.r_threshold_value = r_threshold_value
         self.scale_threshold = scale_threshold_value
@@ -46,34 +52,50 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
         self.pix2pix_model.load_networks("latest")
         self.pix2pix_model.eval()
 
-        # prepare depth estimation model LeRes
-        self.leres_receptive_field_size: int = 448
-        self.leres_patch_size = 2 * self.leres_receptive_field_size
-        leres_model_path = leres_model_path
-        leres_checkpoint = torch.load(leres_model_path)
-        self.leres_model = RelDepthModel(backbone="resnext101")
-        self.leres_model.load_state_dict(
-            strip_prefix_if_present(leres_checkpoint["depth_model"], "module."),
-            strict=True,
-        )
-        torch.cuda.empty_cache()
-        self.leres_model.to(self.device)
-        self.leres_model.eval()
-
         # prepare mask
         self.mask_org = generate_mask((3000, 3000))
         self.mask = self.mask_org.copy()
 
         self.factor = None  # see section 6 of main paper
 
-        # TODO: support other models as well
-        self.depth_estimator_receptive_field_size = self.leres_receptive_field_size
-        self.depth_estimator_patch_size = self.leres_patch_size
+        self.leres_receptive_field_size: int = 448
+        self.leres_patch_size = 2 * self.leres_receptive_field_size
+        self.midas_receptive_field_size: int = 384
+        self.midas_patch_size = 2 * self.midas_receptive_field_size
 
-    def forward(self, image: Image.Image) -> npt.NDArray:
+        if self.depth_estimator == 'leres':
+            # prepare depth estimation model LeRes
+            leres_checkpoint = torch.load(depth_estimator_model_path)
+            self.leres_model = RelDepthModel(backbone="resnext101")
+            self.leres_model.load_state_dict(
+                strip_prefix_if_present(leres_checkpoint["depth_model"], "module."),
+                strict=True,
+            )
+            torch.cuda.empty_cache()
+            self.leres_model.to(self.device)
+            self.leres_model.eval()
+            self.depth_estimator_receptive_field_size = self.leres_receptive_field_size
+            self.depth_estimator_patch_size = self.leres_patch_size
+
+        elif self.depth_estimator == 'midas':
+            self.midas_model = MidasNet(depth_estimator_model_path, non_negative=True)
+            self.midas_model.to(device)
+            self.midas_model.eval()
+            self.depth_estimator_receptive_field_size = self.midas_receptive_field_size
+            self.depth_estimator_patch_size = self.midas_patch_size
+
+
+    def forward(self, image: Image.Image, perform_boosting=True) -> npt.NDArray:
         image_array = np.asarray(image)
         image_array = cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB) / 255.0
         input_resolution = image_array.shape
+
+        if not perform_boosting:
+            prediction = self.single_estimate(image_array, inference_image_size=input_resolution[0])
+            if self.depth_estimator == 'midas':
+                prediction = 1 - prediction
+            
+            return prediction
 
         # Find the best input resolution R-x. The resolution search described in section 5-double estimation of the main paper and section B of the
         # supplementary material.
@@ -236,6 +258,9 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
             )
         else:
             final_estimation = image_and_patches.estimation_updated_image
+        
+        if self.depth_estimator == 'midas':
+            final_estimation = 1 - final_estimation
 
         return final_estimation
 
@@ -282,7 +307,8 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
             print(" \t \t DEBUG| GPU THRESHOLD REACHED", inference_image_size, "--->", self.gpu_threshold)
             inference_image_size = self.gpu_threshold
 
-        # TODO: support other network types as well
+        if self.depth_estimator == 'midas':
+            return self.estimate_midas(image_array, midas_inference_size=inference_image_size)
         return self.estimate_leres(image_array, leres_inference_size=inference_image_size)
 
     def estimate_leres(self, image_array: npt.NDArray, leres_inference_size: int) -> npt.NDArray:
@@ -298,6 +324,46 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
 
         prediction = prediction.squeeze().cpu().numpy()
         prediction = cv2.resize(prediction, (image_array.shape[1], image_array.shape[0]), interpolation=cv2.INTER_CUBIC)
+
+        return prediction
+    
+    def estimate_midas(self, image_array: npt.NDArray, midas_inference_size: int) -> npt.NDArray:
+       # MiDas -v2 forward pass script adapted from https://github.com/intel-isl/MiDaS/tree/v2
+
+        transform = transforms.Compose(
+            [
+                Resize(
+                    midas_inference_size,
+                    midas_inference_size,
+                    resize_target=None,
+                    keep_aspect_ratio=True,
+                    ensure_multiple_of=32,
+                    resize_method="upper_bound",
+                    image_interpolation_method=cv2.INTER_CUBIC,
+                ),
+                NormalizeImage(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+                PrepareForNet(),
+            ]
+        )
+
+        img_input = transform({"image": image_array})["image"]
+
+        # Forward pass
+        with torch.no_grad():
+            sample = torch.from_numpy(img_input).to(self.device).unsqueeze(0)
+            prediction = self.midas_model.forward(sample)
+
+        prediction = prediction.squeeze().cpu().numpy()
+        prediction = cv2.resize(prediction, (image_array.shape[1], image_array.shape[0]), interpolation=cv2.INTER_CUBIC)
+
+        # Normalization
+        depth_min = prediction.min()
+        depth_max = prediction.max()
+
+        if depth_max - depth_min > np.finfo("float").eps:
+            prediction = (prediction - depth_min) / (depth_max - depth_min)
+        else:
+            prediction = 0
 
         return prediction
 
