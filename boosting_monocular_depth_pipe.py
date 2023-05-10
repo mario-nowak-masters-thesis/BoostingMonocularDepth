@@ -1,5 +1,5 @@
 from operator import getitem
-from typing import Literal
+from typing import Literal, Union
 import torch
 from torchvision.transforms import transforms
 import numpy as np
@@ -45,6 +45,7 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
         self.gpu_threshold = gpu_threshold  # Limit for the GPU (NVIDIA RTX 2080), can be adjusted
         self.max_res = np.inf
         self.output_depth_in_original_resolution = output_depth_in_original_resolution
+        self.depth_estimator_model_path = depth_estimator_model_path
 
         # prepare pix2pix
         self.pix2pix_inference_dimensions = (1024, 1024)
@@ -65,7 +66,7 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
 
         if self.depth_estimator == 'leres':
             # prepare depth estimation model LeRes
-            leres_checkpoint = torch.load(depth_estimator_model_path)
+            leres_checkpoint = torch.load(self.depth_estimator_model_path)
             self.leres_model = RelDepthModel(backbone="resnext101")
             self.leres_model.load_state_dict(
                 strip_prefix_if_present(leres_checkpoint["depth_model"], "module."),
@@ -78,11 +79,14 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
             self.depth_estimator_patch_size = self.leres_patch_size
 
         elif self.depth_estimator == 'midas':
-            self.midas_model = MidasNet(depth_estimator_model_path, non_negative=True)
+            self.midas_model = MidasNet(self.depth_estimator_model_path, non_negative=True)
             self.midas_model.to(device)
             self.midas_model.eval()
             self.depth_estimator_receptive_field_size = self.midas_receptive_field_size
             self.depth_estimator_patch_size = self.midas_patch_size
+        
+        self.midas_scale: Union[float, None] = None
+        self.midas_shift: Union[float, None] = None
 
 
     def forward(self, image: Image.Image, perform_boosting=True) -> npt.NDArray:
@@ -92,8 +96,8 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
 
         if not perform_boosting:
             prediction = self.single_estimate(image_array, inference_image_size=input_resolution[0])
-            if self.depth_estimator == 'midas':
-                prediction = 1 - prediction
+            # if self.depth_estimator == 'midas':
+            #     prediction = 1 - prediction
             
             return prediction
 
@@ -351,21 +355,25 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
         # Forward pass
         with torch.no_grad():
             sample = torch.from_numpy(img_input).to(self.device).unsqueeze(0)
-            prediction = self.midas_model.forward(sample)
+            disparity_prediction = self.midas_model.forward(sample)
 
-        prediction = prediction.squeeze().cpu().numpy()
-        prediction = cv2.resize(prediction, (image_array.shape[1], image_array.shape[0]), interpolation=cv2.INTER_CUBIC)
+        disparity_prediction = disparity_prediction.squeeze().cpu().numpy()
+        disparity_prediction = cv2.resize(disparity_prediction, (image_array.shape[1], image_array.shape[0]), interpolation=cv2.INTER_CUBIC)
 
-        # Normalization
-        depth_min = prediction.min()
-        depth_max = prediction.max()
+        depth = depth_prediction = disparity_prediction
 
-        if depth_max - depth_min > np.finfo("float").eps:
-            prediction = (prediction - depth_min) / (depth_max - depth_min)
+        # Inverted Normalization
+        midas_scale_and_shift_unknown = self.midas_scale == None and self.midas_shift == None
+        if midas_scale_and_shift_unknown:
+            self.midas_scale = depth.min() - depth.max()
+            self.midas_shift = depth.max()
+
+        if self.midas_scale and np.abs(self.midas_scale) > np.finfo("float").eps:
+            normalized_depth = (depth - self.midas_shift ) / self.midas_scale
         else:
-            prediction = 0
+            normalized_depth = 0
 
-        return prediction
+        return normalized_depth
 
     def scale_torch(self, image_array: npt.NDArray) -> torch.Tensor:
         """
@@ -472,3 +480,65 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
 
         # Return selected patches
         return patchlist
+    
+    def estimate_fined_tuned_midas_depth(self,
+        image: Image.Image,
+        inpainting_mask: torch.Tensor,
+        rendered_depth: torch.Tensor,
+        number_training_epochs = 300,
+        learning_rate = 1e-7,
+    ) -> npt.NDArray:
+        image_array = np.asarray(image)
+        image_array = cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB) / 255.0
+        transform = transforms.Compose(
+            [
+                NormalizeImage(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+                PrepareForNet(),
+            ]
+        )
+        unnormalized_rendered_disparity = rendered_depth * self.midas_scale + self.midas_shift 
+        input_image = transform({"image": image_array})["image"]
+
+        optimizer = torch.optim.Adam(self.midas_model.parameters(), lr=learning_rate)
+        self.midas_model = MidasNet(self.depth_estimator_model_path, non_negative=True)
+        self.midas_model.train()
+
+        self.midas_model.to(self.device)
+
+        def loss_function(
+            predicted_disparity: torch.Tensor,
+            rendered_disparity: torch.Tensor,
+        ) -> torch.Tensor:
+            loss = torch.linalg.matrix_norm(rendered_disparity * ~inpainting_mask - predicted_disparity * ~inpainting_mask, ord=1)
+            return loss
+
+        # Fine tune
+        for _ in range(number_training_epochs):
+            input = torch.from_numpy(input_image).to(self.device).unsqueeze(0)
+            optimizer.zero_grad()
+
+            disparity_prediction = self.midas_model.forward(input)
+
+            loss = loss_function(disparity_prediction, unnormalized_rendered_disparity)
+            loss.backward()
+
+            optimizer.step()
+        
+        # Predict
+        self.midas_model.eval()
+        with torch.no_grad():
+            input = torch.from_numpy(input_image).to(self.device).unsqueeze(0)
+            disparity_prediction = self.midas_model.forward(input) 
+
+        disparity_prediction = disparity_prediction.squeeze().cpu().numpy()
+        disparity_prediction = cv2.resize(disparity_prediction, (image_array.shape[1], image_array.shape[0]), interpolation=cv2.INTER_CUBIC)
+
+        depth = depth_prediction = disparity_prediction
+
+        # Inverted Normalization
+        if self.midas_scale and np.abs(self.midas_scale) > np.finfo("float").eps:
+            normalized_depth = (depth - self.midas_shift ) / self.midas_scale
+        else:
+            normalized_depth = 0
+
+        return normalized_depth
