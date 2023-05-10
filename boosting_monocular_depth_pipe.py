@@ -481,6 +481,7 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
         # Return selected patches
         return patchlist
     
+    @torch.enable_grad()
     def estimate_fined_tuned_midas_depth(self,
         image: Image.Image,
         inpainting_mask: torch.Tensor,
