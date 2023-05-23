@@ -6,6 +6,7 @@ import numpy as np
 import numpy.typing as npt
 from PIL import Image
 import cv2
+from tqdm import tqdm
 
 from BoostingMonocularDepth.lib.multi_depth_model_woauxi import RelDepthModel
 from BoostingMonocularDepth.lib.net_tools import strip_prefix_if_present
@@ -500,9 +501,9 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
         unnormalized_rendered_disparity = rendered_depth * self.midas_scale + self.midas_shift 
         input_image = transform({"image": image_array})["image"]
 
-        optimizer = torch.optim.Adam(self.midas_model.parameters(), lr=learning_rate)
         self.midas_model = MidasNet(self.depth_estimator_model_path, non_negative=True)
         self.midas_model.train()
+        optimizer = torch.optim.Adam(self.midas_model.parameters(), lr=learning_rate)
 
         self.midas_model.to(self.device)
 
@@ -514,7 +515,8 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
             return loss
 
         # Fine tune
-        for _ in range(number_training_epochs):
+        progress_bar = tqdm(range(number_training_epochs))
+        for epoch in progress_bar:
             input = torch.from_numpy(input_image).to(self.device).unsqueeze(0)
             optimizer.zero_grad()
 
@@ -524,6 +526,7 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
             loss.backward()
 
             optimizer.step()
+            progress_bar.set_description(f"fine-tuning epoch [{epoch + 1}/{number_training_epochs}]")
         
         # Predict
         self.midas_model.eval()
