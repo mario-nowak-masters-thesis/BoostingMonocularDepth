@@ -361,20 +361,24 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
         disparity_prediction = disparity_prediction.squeeze().cpu().numpy()
         disparity_prediction = cv2.resize(disparity_prediction, (image_array.shape[1], image_array.shape[0]), interpolation=cv2.INTER_CUBIC)
 
-        depth = depth_prediction = disparity_prediction
+        depth = depth_prediction = 1 / disparity_prediction
+        new_min = 0
+        new_max = 1
 
-        # Inverted Normalization
-        midas_scale_and_shift_unknown = self.midas_scale == None and self.midas_shift == None
-        if midas_scale_and_shift_unknown:
-            self.midas_scale = depth.min() - depth.max()
-            self.midas_shift = depth.max()
+        # depth = np.nan_to_num(depth)
 
-        if self.midas_scale and np.abs(self.midas_scale) > np.finfo("float").eps:
-            normalized_depth = (depth - self.midas_shift ) / self.midas_scale
-        else:
-            normalized_depth = 0
+        # # Inverted Normalization
+        # midas_scale_and_shift_unknown = self.midas_scale == None and self.midas_shift == None
+        # if midas_scale_and_shift_unknown:
+        #     self.midas_scale = depth.max() - depth.min()
+        #     self.midas_shift = depth.min()
 
-        return normalized_depth
+        # if self.midas_scale and np.abs(self.midas_scale) > np.finfo("float").eps:
+        #     normalized_depth = ((new_max - new_min) * (depth - self.midas_shift )) / self.midas_scale + new_min
+        # else:
+        #     normalized_depth = 0
+
+        return depth
 
     def scale_torch(self, image_array: npt.NDArray) -> torch.Tensor:
         """
