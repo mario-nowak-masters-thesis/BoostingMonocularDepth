@@ -361,8 +361,8 @@ class BoostingMonocularDepthPipeline(torch.nn.Module):
         disparity_prediction = disparity_prediction.squeeze().cpu().numpy()
         disparity_prediction = cv2.resize(disparity_prediction, (image_array.shape[1], image_array.shape[0]), interpolation=cv2.INTER_CUBIC)
 
-        new_min = 0.5
-        new_max = 4
+        new_min = 0.25
+        new_max = 2
         scaled_disparity = ((new_max - new_min) * (disparity_prediction - disparity_prediction.min())) / (disparity_prediction.max() - disparity_prediction.min()) + new_min
 
         depth = depth_prediction = 1 / scaled_disparity
